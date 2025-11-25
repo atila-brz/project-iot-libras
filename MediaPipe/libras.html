@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Projeto LIBRAS - Integrado API</title>
+    
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js" crossorigin="anonymous"></script>
+
+    <style>
+        body {
+            background-color: #1e1e1e;
+            color: white;
+            font-family: sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin: 0;
+            padding: 20px;
+        }
+
+        h1 { margin-bottom: 10px; color: #d500f9; }
+
+        .video-container {
+            position: relative;
+            width: 640px;
+            height: 480px;
+            border: 3px solid #d500f9;
+            border-radius: 10px;
+            overflow: hidden;
+            background: #000;
+        }
+
+        .output_canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+
+        .input_video { display: none; }
+
+        .result-box {
+            margin-top: 20px;
+            padding: 20px 40px;
+            background-color: #333;
+            border-radius: 10px;
+            text-align: center;
+            border: 2px solid #555;
+            min-width: 200px;
+        }
+
+        .big-letter {
+            font-size: 4em;
+            font-weight: bold;
+            color: #d500f9;
+            display: block;
+        }
+        
+        .instruction {
+            font-size: 0.9em;
+            color: #aaa;
+            margin-top: 5px;
+        }
+        
+        /* Indicador de Status da API */
+        .api-status {
+            margin-top: 10px;
+            font-size: 0.8em;
+            color: #888;
+        }
+    </style>
+</head>
+
+<body>
+
+    <h1>Detector LIBRAS + MQTT</h1>
+
+    <div class="video-container">
+        <video class="input_video"></video>
+        <canvas class="output_canvas" width="640" height="480"></canvas>
+    </div>
+
+    <div class="result-box">
+        <span class="instruction">Faça um gesto (Mão Direita): A, B, L, V, Y, W</span>
+        <span id="letter-display" class="big-letter">---</span>
+        <div id="api-log" class="api-status">Aguardando detecção...</div>
+    </div>
+
+    <script type="text/javascript">
+        const videoElement = document.getElementsByClassName('input_video')[0];
+        const canvasElement = document.getElementsByClassName('output_canvas')[0];
+        const canvasCtx = canvasElement.getContext('2d');
+        const letterDisplay = document.getElementById('letter-display');
+        const apiLog = document.getElementById('api-log');
+
+        let letraAtualParaEnvio = null; 
+        const API_URL = "http://127.0.0.1:5000/api/enviar-letra"; 
+
+        function distance(p1, p2) {
+            return Math.sqrt(Math.pow(p2.x - p1.x, 2) + Math.pow(p2.y - p1.y, 2));
+        }
+
+        function detectLetter(landmarks) {
+            const indexOpen = landmarks[8].y < landmarks[6].y;
+            const middleOpen = landmarks[12].y < landmarks[10].y;
+            const ringOpen = landmarks[16].y < landmarks[14].y;
+            const pinkyOpen = landmarks[20].y < landmarks[18].y;
+            
+            const thumbOpen = distance(landmarks[4], landmarks[17]) > 0.25;
+
+            if (!indexOpen && !middleOpen && !ringOpen && !pinkyOpen && !thumbOpen) return "A";
+
+            if (indexOpen && middleOpen && ringOpen && pinkyOpen && !thumbOpen) return "B";
+            
+            if (thumbOpen && indexOpen && !middleOpen && !ringOpen && !pinkyOpen) return "L";
+
+            if (!thumbOpen && indexOpen && middleOpen && !ringOpen && !pinkyOpen) return "V";
+
+            if (!thumbOpen && indexOpen && middleOpen && ringOpen && !pinkyOpen) return "W";
+            
+            if (thumbOpen && !indexOpen && !middleOpen && !ringOpen && pinkyOpen) return "Y";
+
+            return null;
+        }
+
+        function onResults(results) {
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            
+            canvasCtx.translate(canvasElement.width, 0);
+            canvasCtx.scale(-1, 1);
+            
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+            const rHand = results.rightHandLandmarks;
+            const lHand = results.leftHandLandmarks;
+            
+            if (rHand) {
+                drawConnectors(canvasCtx, rHand, HAND_CONNECTIONS, {color: '#00FF00', lineWidth: 3});
+                drawLandmarks(canvasCtx, rHand, {color: '#FF0000', lineWidth: 1, radius: 4});
+            }
+            if (lHand) {
+                drawConnectors(canvasCtx, lHand, HAND_CONNECTIONS, {color: '#00FF00', lineWidth: 3});
+                drawLandmarks(canvasCtx, lHand, {color: '#FF0000', lineWidth: 1, radius: 4});
+            }
+
+            let detected = null;
+
+            if (rHand) detected = detectLetter(rHand);
+            else if (lHand) detected = detectLetter(lHand);
+
+            canvasCtx.restore();
+
+            if (detected) {
+                letterDisplay.innerText = detected;
+                letterDisplay.style.color = "#00FF00";
+                
+                letraAtualParaEnvio = detected; 
+            } else {
+                letterDisplay.innerText = "---";
+                letterDisplay.style.color = "#555";
+                
+                letraAtualParaEnvio = null;
+            }
+        }
+
+        const holistic = new Holistic({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`;
+        }});
+
+        holistic.setOptions({
+            selfieMode: false,
+            upperBodyOnly: true,
+            smoothLandmarks: true,
+            minDetectionConfidence: 0.6,
+            minTrackingConfidence: 0.6
+        });
+
+        holistic.onResults(onResults);
+
+        const camera = new Camera(videoElement, {
+            onFrame: async () => {
+                await holistic.send({image: videoElement});
+            },
+            width: 640,
+            height: 480
+        });
+        
+        camera.start();
+
+        setInterval(() => {
+            if (letraAtualParaEnvio) {
+                enviarParaAPI(letraAtualParaEnvio);
+            }
+        }, 1000); 
+
+        function enviarParaAPI(letra) {
+            fetch(API_URL, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({ "letra": letra })
+            })
+            .then(response => {
+                if(response.ok) {
+                    apiLog.innerText = `Enviado '${letra}' com sucesso!`;
+                    apiLog.style.color = "#00FF00";
+                } else {
+                    apiLog.innerText = "Erro ao enviar para API";
+                    apiLog.style.color = "orange";
+                }
+            })
+            .catch(error => {
+                console.error("Erro API:", error);
+                apiLog.innerText = "API Offline ou Bloqueada";
+                apiLog.style.color = "red";
+            });
+        }
+
+    </script>
+</body>
+</html>
